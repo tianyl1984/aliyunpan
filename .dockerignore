@@ -1,0 +1,29 @@
+# Docker 构建上下文排除规则。
+# 路径相对于构建上下文根目录（即仓库根目录）。
+
+# --- 安全：绝不能进镜像的凭据文件 ---
+# 根目录的 aliyunpan_config.json 里有 access/refresh token，
+# webui.json 里有 Web 访问 token，一旦 COPY 进去就会永久留在镜像层里。
+aliyunpan_config.json
+webui.json
+aliyunpan_command_history.txt
+account.txt
+
+# --- 体积：不需要进上下文的东西 ---
+.git
+.github
+.idea
+.claude
+web/node_modules
+web/dist
+out/
+docker/sync/data
+docs/
+
+# --- 本地构建产物 ---
+aliyunpan
+aliyunpan.exe
+*.test
+*.log
+*.out
+.DS_Store

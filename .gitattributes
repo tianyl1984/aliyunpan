@@ -1,0 +1,2 @@
+# webui 前端构建产物：折叠 diff、不参与语言统计
+internal/webui/assets/dist/** linguist-generated=true -diff

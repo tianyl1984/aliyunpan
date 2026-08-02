@@ -1,0 +1,94 @@
+# aliyunpan Web 管理界面。
+#
+# 用法（在本文件所在目录执行）：
+#   1. cp .env.example .env  然后改掉里面的口令
+#   2. docker compose up -d --build
+#   3. 浏览器打开 http://<服务器IP>:8080 ，用 .env 里的口令登录，
+#      再到"账号"页扫码登录阿里云盘
+#
+# 注意：不写 version 字段，Compose V2 起该字段已废弃。
+
+services:
+  webui:
+    build:
+      # 构建上下文是仓库根目录：镜像里要现编 Go 源码和 web/ 前端
+      context: ../..
+      dockerfile: docker/webui/Dockerfile
+      args:
+        VERSION: v0.4.0
+        # 连不上 Docker Hub / npmjs 时，整体换成镜像站再构建
+        #NODE_IMAGE: <镜像站>/node:20-alpine
+        #GO_IMAGE: <镜像站>/golang:1.24-alpine
+        #RUNTIME_IMAGE: <镜像站>/alpine:3.21
+        #NPM_REGISTRY: https://registry.npmmirror.com
+        #GOPROXY: https://goproxy.cn,direct
+    image: aliyunpan-webui:local
+    container_name: aliyunpan-webui
+    restart: unless-stopped
+
+    ports:
+      # 宿主端口与容器端口不一致时（例如 "9000:8080"），必须在下面的
+      # ALIYUNPAN_WEBUI_TRUSTED_ORIGINS 里声明浏览器实际访问的地址，
+      # 否则写操作（含登录）会返回 403 Origin 不匹配。
+      # 页面本身仍能打开（GET 不做 CSRF 校验），症状是"能进但登不上"。
+      #
+      # 宿主端口在 .env 里改 WEBUI_PORT。
+      # 只想本机访问就把下面整行改成 "127.0.0.1:${WEBUI_PORT:-8070}:8080"
+      - "${WEBUI_PORT:-8080}:8080"
+
+    volumes:
+      # 冒号左边（宿主路径）都在同目录的 .env 里配置，留空则用这里的默认值。
+      # 相对路径的基准是本文件所在目录，不是执行 docker compose 的目录；
+      # 挂到别处建议直接写绝对路径。
+      #
+      # （必须）配置目录。存放 aliyunpan_config.json(登录凭据)、webui.json、
+      # 下载断点，以及浏览器直传的暂存文件 webui_stage/。
+      # 不挂载的话容器一重建就要重新扫码登录，且大文件上传会占满容器可写层。
+      - ${ALIYUNPAN_CONFIG_DIR:-./config}:/config
+      # （必须）网页里可浏览和下载到的本地目录。
+      # 冒号右边的 /data 不要改成变量：它同时被下面的
+      # ALIYUNPAN_WEBUI_LOCAL_ROOTS 引用，两处不一致网页里就看不到这个目录。
+      - ${ALIYUNPAN_DATA_DIR:-./downloads}:/data
+      # （可选）再挂更多目录，记得同步加到 ALIYUNPAN_WEBUI_LOCAL_ROOTS。
+      # 注意：挂载条目的"有无"没法用 .env 控制（变量为空会变成空条目直接报错），
+      # 需要按环境增减挂载请用 docker-compose.override.yml。
+      #- /mnt/media:/media
+
+    environment:
+      - TZ=Asia/Shanghai
+      # （必须）Web 访问口令。容器监听 0.0.0.0，程序强制要求设口令，缺失会拒绝启动。
+      # 值放在同目录的 .env 文件里，不要直接写在这里。
+      - ALIYUNPAN_WEBUI_PASSWORD=${ALIYUNPAN_WEBUI_PASSWORD:?请先创建 .env 并设置 ALIYUNPAN_WEBUI_PASSWORD}
+      # 容器内的监听端口
+      - ALIYUNPAN_WEBUI_PORT=8080
+
+      # 可信来源：浏览器地址栏里实际用的地址，多个用英文逗号分隔。
+      # 默认只信任"Origin 指向容器监听地址"，以下三种情况都必须显式声明：
+      #   1. 端口映射不一致，如 ports 写成 "9000:8080"
+      #        -> http://192.168.1.10:9000
+      #   2. 反向代理（含标准的 80/443 端口）
+      #        -> https://pan.example.com
+      #   3. 反向代理用非标准端口
+      #        -> https://pan.example.com:8443
+      # 必须带 http:// 或 https:// 前缀，写错会直接启动失败并给出提示。
+      # 不接受通配符 *。声明是叠加的，直连 IP:8080 依然可用。
+      #- ALIYUNPAN_WEBUI_TRUSTED_ORIGINS=https://pan.example.com,http://192.168.1.10:9000
+      # 允许在网页里浏览的容器内目录，逗号分隔，必须与上面 volumes 的容器侧路径对应
+      - ALIYUNPAN_WEBUI_LOCAL_ROOTS=/data
+      #- ALIYUNPAN_WEBUI_LOCAL_ROOTS=/data,/media
+
+      # （可选）容器内直接跑 HTTPS。一般建议交给反向代理，这里留个口子。
+      #- ALIYUNPAN_WEBUI_TLS_CERT=/config/tls/fullchain.pem
+      #- ALIYUNPAN_WEBUI_TLS_KEY=/config/tls/privkey.pem
+
+    # 优雅退出最长要 20 秒（传输任务落盘 10s + HTTP 关闭 10s），
+    # Docker 默认只给 10 秒就 SIGKILL，会打断断点写盘，所以放宽到 30 秒。
+    stop_grace_period: 30s
+
+    # healthcheck 已在 Dockerfile 里定义，这里不重复
+
+    # 大文件上传/下载时容器内存占用有限，但传输并发高时可以按需放开
+    #deploy:
+    #  resources:
+    #    limits:
+    #      memory: 1g

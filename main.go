@@ -658,6 +658,7 @@ func main() {
 		}
 		app.Commands = append(app.Commands, hiddenCommands...)
 	}
+	app.Commands = append(app.Commands, extraCommands()...) // fork 新增命令，定义见 main_webui.go
 	sort.Sort(cli.FlagsByName(app.Flags))
 	sort.Sort(cli.CommandsByName(app.Commands))
 	app.Run(os.Args)

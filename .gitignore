@@ -45,3 +45,16 @@ git_pull.sh
 docker/sync/data
 clear_docker.sh
 upload.sh
+# webui 前端（fork 新增）
+web/node_modules/
+web/dist/
+# 前端构建产物不提交，只保留 .gitkeep 占位。
+# go:embed 在目录不存在或为空时会编译失败，占位文件保证 go build 能过；
+# 但打包前必须先执行 ./build_web.sh，否则二进制里没有真正的前端资源。
+internal/webui/assets/dist/*
+!internal/webui/assets/dist/.gitkeep
+
+# webui docker 部署的本地数据与口令，不提交
+docker/webui/.env
+docker/webui/config/
+docker/webui/downloads/
