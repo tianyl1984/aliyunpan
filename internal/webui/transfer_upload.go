@@ -78,7 +78,7 @@ func (m *Manager) SubmitUpload(u *config.PanUser, spec *JobSpec) (*Job, error) {
 	executor.SetParallel(allParallel)
 	statistic := &panupload.UploadStatistic{}
 	statistic.StartTimer()
-	panel := silentPanel(ui.DashboardPanelUpload, allParallel, job.speeds, job.onPanelProgress)
+	panel := silentPanel(ui.DashboardPanelUpload, allParallel, job)
 	fileRecorder := log.NewFileRecorder(config.GetLogDir() + "/upload_file_records.csv")
 	folderCreateMutex := &sync.Mutex{}
 

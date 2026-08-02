@@ -1,11 +1,13 @@
 package webui
 
 import (
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/tickstep/aliyunpan/internal/taskframework"
+	"github.com/tickstep/aliyunpan/internal/ui"
 	"github.com/tickstep/library-go/requester/rio/speeds"
 )
 
@@ -441,21 +443,30 @@ func (j *Job) Cancel() error {
 
 // ---- 进度记录（作为委托包装器的 sink） ----
 
-func (j *Job) registerTask(id, panPath, localPath string, size int64) {
+// registerTask 登记一个文件任务，返回是否为新增。
+// 包装器与面板钩子都可能登记同一个 id，重复登记必须忽略，否则会抹掉已有进度。
+func (j *Job) registerTask(id, panPath, localPath string, size int64) bool {
 	j.mu.Lock()
-	if _, ok := j.tasks[id]; !ok {
-		j.order = append(j.order, id)
+	defer j.mu.Unlock()
+	if _, ok := j.tasks[id]; ok {
+		return false
 	}
+	j.order = append(j.order, id)
 	j.tasks[id] = &taskRec{
 		Id: id, Path: panPath, LocalPath: localPath, Size: size, State: TaskQueued,
 	}
-	j.mu.Unlock()
+	return true
 }
 
 func (j *Job) markTask(id, state, msg string) {
 	j.mu.Lock()
 	t := j.tasks[id]
 	if t == nil {
+		j.mu.Unlock()
+		return
+	}
+	if t.State == state && t.Message == msg {
+		// 包装器与面板钩子会汇报同一个状态，重复事件没必要推给前端
 		j.mu.Unlock()
 		return
 	}
@@ -483,6 +494,51 @@ func (j *Job) markTask(id, state, msg string) {
 // 这里直接借道同一份数据，无需另外去猜本地文件大小。
 func (j *Job) onPanelProgress(id string, done, total, speed int64, _ time.Duration) {
 	j.updateTaskProgress(id, done, total, speed)
+}
+
+// onPanelRegister 统计面板的任务注册钩子。
+//
+// 下载文件夹时，真正的文件任务是 DownloadTaskUnit.Run() 在运行期展开、直接塞进
+// 父执行器的裸任务单元（见 download_task_unit.go 的「添加子任务」），不经过
+// wrappedUnit，因此 registerTask 抓不到它们。面板是唯一能看见这些子任务的地方，
+// 补登记之后它们的进度与状态才会出现在网页上。
+//
+// 子文件夹任务不登记：它自己还会继续展开，登记进来只会多出一条 0 字节的空行。
+func (j *Job) onPanelRegister(id, panPath string, total int64, isFile bool) {
+	if id == "" || !isFile {
+		return
+	}
+	if !j.registerTask(id, panPath, j.localPathOf(panPath), total) {
+		return
+	}
+	j.mgr.events.Publish(Event{Type: EventJobProgress, Data: j.Snapshot(false)})
+}
+
+// onPanelState 统计面板的任务状态钩子，同样是为了跟上动态展开的子任务
+func (j *Job) onPanelState(id string, state ui.TaskState, message string) {
+	var st string
+	switch state {
+	case ui.TaskRunning:
+		st = TaskRunning
+	case ui.TaskSuccess, ui.TaskSkipped:
+		// 跳过的文件（本地已存在、秒传）对网页来说等同于完成
+		st = TaskSuccess
+	case ui.TaskFailed:
+		st = TaskFailed
+	case ui.TaskCanceled:
+		st = TaskCanceled
+	default:
+		return
+	}
+	j.markTask(id, st, message)
+}
+
+// localPathOf 推算网盘路径对应的本地落盘位置，仅用于展示
+func (j *Job) localPathOf(panPath string) string {
+	if j.Type != JobDownload || j.SaveTo == "" || panPath == "" {
+		return ""
+	}
+	return filepath.Join(j.SaveTo, filepath.FromSlash(panPath))
 }
 
 // updateTaskProgress 更新单文件字节进度，带节流。total <= 0 表示总大小未知，沿用注册时的值。

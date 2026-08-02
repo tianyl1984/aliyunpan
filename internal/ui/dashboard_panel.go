@@ -53,6 +53,12 @@ type DashboardOptions struct {
 	// OnProgress 进度回调。面板本身只负责终端渲染，某些场景（如 Web UI）需要把
 	// 同一份字节级进度转发出去，挂这个钩子即可，不用改动上传/下载任务单元。
 	OnProgress func(id string, downloaded, total, speed int64, eta time.Duration)
+	// OnRegister 任务注册回调。下载文件夹时子任务是在运行期动态展开的
+	// （download_task_unit.go 的 Run 里 Append 到父执行器），面板是唯一能看到
+	// 这些子任务的地方，外部要跟上进度就得挂这个钩子。
+	OnRegister func(id, path string, total int64, isFile bool)
+	// OnState 任务状态回调
+	OnState func(id string, state TaskState, message string)
 }
 
 // DashboardPanel 统计面板使用了很多ANSI转义序列。并不是所有的终端都支持ANSI转义序列，所以需要做兼容性处理。
@@ -75,6 +81,8 @@ type DashboardPanel struct {
 	closeOnce     sync.Once
 	out           io.Writer
 	onProgress    func(id string, downloaded, total, speed int64, eta time.Duration)
+	onRegister    func(id, path string, total int64, isFile bool)
+	onState       func(id string, state TaskState, message string)
 }
 
 type dashboardTask struct {
@@ -124,6 +132,8 @@ func NewDashboardPanel(dashboardType DashboardType, parallel int, globalSpeeds *
 			db.out = opts.Output
 		}
 		db.onProgress = opts.OnProgress
+		db.onRegister = opts.OnRegister
+		db.onState = opts.OnState
 	}
 	if db.activeSlots < 1 {
 		db.activeSlots = 1
@@ -179,7 +189,6 @@ func (db *DashboardPanel) RegisterTask(id, path string, total int64, isFile bool
 		return
 	}
 	db.mu.Lock()
-	defer db.mu.Unlock()
 	task := db.getOrCreateTaskLocked(id)
 	if path != "" {
 		task.path = path
@@ -191,6 +200,12 @@ func (db *DashboardPanel) RegisterTask(id, path string, total int64, isFile bool
 		task.total = total
 	}
 	task.isFile = isFile
+	cb := db.onRegister
+	db.mu.Unlock()
+
+	if cb != nil {
+		cb(id, path, total, isFile)
+	}
 }
 
 // UpdateTaskInfo 更新任务信息
@@ -238,7 +253,6 @@ func (db *DashboardPanel) MarkTaskState(id string, state TaskState, message stri
 		return
 	}
 	db.mu.Lock()
-	defer db.mu.Unlock()
 	task := db.getOrCreateTaskLocked(id)
 	task.state = state
 	if message != "" {
@@ -247,6 +261,12 @@ func (db *DashboardPanel) MarkTaskState(id string, state TaskState, message stri
 	switch state {
 	case TaskSuccess, TaskFailed, TaskSkipped, TaskCanceled:
 		db.appendHistoryLocked(db.defaultHistoryMessage(task, message))
+	}
+	cb := db.onState
+	db.mu.Unlock()
+
+	if cb != nil {
+		cb(id, state, message)
 	}
 }
 

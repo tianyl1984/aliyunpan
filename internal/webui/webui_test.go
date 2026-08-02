@@ -395,7 +395,7 @@ func TestPanelProgressReachesSnapshot(t *testing.T) {
 	job.registerTask("1", "/a.bin", "/tmp/a.bin", 1000)
 	job.markTask("1", TaskRunning, "")
 
-	panel := silentPanel(ui.DashboardPanelDownload, 1, job.speeds, job.onPanelProgress)
+	panel := silentPanel(ui.DashboardPanelDownload, 1, job)
 	panel.UpdateTaskProgress("1", 400, 1000, 128, time.Second)
 
 	snap := job.Snapshot(true)
@@ -410,5 +410,48 @@ func TestPanelProgressReachesSnapshot(t *testing.T) {
 	panel.UpdateTaskProgress("1", 9999, 2000, 0, 0)
 	if snap = job.Snapshot(true); snap.BytesDone != 2000 || snap.BytesTotal != 2000 {
 		t.Fatalf("进度 = %d/%d, want 2000/2000", snap.BytesDone, snap.BytesTotal)
+	}
+}
+
+// 下载文件夹时子任务是运行期动态展开、直接进父执行器的，不经过 wrappedUnit。
+// 它们只在统计面板上露过面，漏掉就会出现「文件夹任务进度恒为 0」。
+func TestPanelRegistersExpandedSubTasks(t *testing.T) {
+	m := NewManager(NewEventBroker(), func(string, ...interface{}) {})
+	job, err := m.newJob(&JobSpec{Type: JobDownload, SaveTo: "/downloads"}, "dir")
+	if err != nil {
+		t.Fatalf("newJob 失败: %v", err)
+	}
+	job.SaveTo = "/downloads"
+	job.state = JobRunning
+	panel := silentPanel(ui.DashboardPanelDownload, 1, job)
+
+	// 文件夹本身是包装过的任务，大小为 0
+	job.registerTask("1", "/dir", "", 0)
+	job.markTask("1", TaskRunning, "")
+
+	// 展开出两个文件子任务 + 一个子文件夹，只有文件应当被登记
+	panel.RegisterTask("2", "/dir/a.bin", 600, true)
+	panel.RegisterTask("3", "/dir/b.bin", 400, true)
+	panel.RegisterTask("4", "/dir/sub", 0, false)
+
+	snap := job.Snapshot(true)
+	if snap.FilesTotal != 3 || snap.BytesTotal != 1000 {
+		t.Fatalf("展开后 = %d 个文件 / %d 字节, want 3/1000", snap.FilesTotal, snap.BytesTotal)
+	}
+	if lp := snap.Tasks[1].LocalPath; lp != filepath.Join("/downloads", "dir", "a.bin") {
+		t.Fatalf("子任务本地路径 = %q", lp)
+	}
+
+	// 子任务的进度与状态同样要能落到快照上
+	panel.UpdateTaskProgress("2", 300, 600, 64, time.Second)
+	panel.MarkTaskState("3", ui.TaskSkipped, "文件已存在")
+	if snap = job.Snapshot(false); snap.BytesDone != 700 || snap.FilesDone != 1 {
+		t.Fatalf("进度 = %d 字节 / %d 个完成, want 700/1", snap.BytesDone, snap.FilesDone)
+	}
+
+	// 重复登记不得抹掉已有进度
+	panel.RegisterTask("2", "/dir/a.bin", 600, true)
+	if snap = job.Snapshot(false); snap.BytesDone != 700 {
+		t.Fatalf("重复登记后进度被重置: %d", snap.BytesDone)
 	}
 }
