@@ -74,7 +74,7 @@ services:
       #        -> https://pan.example.com:8443
       # 必须带 http:// 或 https:// 前缀，写错会直接启动失败并给出提示。
       # 不接受通配符 *。声明是叠加的，直连 IP:8080 依然可用。
-      - ALIYUNPAN_WEBUI_TRUSTED_ORIGINS=${ALIYUNPAN_WEBUI_TRUSTED_ORIGINS:}
+      - ALIYUNPAN_WEBUI_TRUSTED_ORIGINS=${ALIYUNPAN_WEBUI_TRUSTED_ORIGINS:-}
       # 允许在网页里浏览的容器内目录，逗号分隔，必须与上面 volumes 的容器侧路径对应
       - ALIYUNPAN_WEBUI_LOCAL_ROOTS=/data
       #- ALIYUNPAN_WEBUI_LOCAL_ROOTS=/data,/media
