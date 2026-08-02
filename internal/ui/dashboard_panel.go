@@ -50,6 +50,9 @@ type DashboardOptions struct {
 	MaxHistory  int
 	ActiveSlots int
 	Output      io.Writer
+	// OnProgress 进度回调。面板本身只负责终端渲染，某些场景（如 Web UI）需要把
+	// 同一份字节级进度转发出去，挂这个钩子即可，不用改动上传/下载任务单元。
+	OnProgress func(id string, downloaded, total, speed int64, eta time.Duration)
 }
 
 // DashboardPanel 统计面板使用了很多ANSI转义序列。并不是所有的终端都支持ANSI转义序列，所以需要做兼容性处理。
@@ -71,6 +74,7 @@ type DashboardPanel struct {
 	startOnce     sync.Once
 	closeOnce     sync.Once
 	out           io.Writer
+	onProgress    func(id string, downloaded, total, speed int64, eta time.Duration)
 }
 
 type dashboardTask struct {
@@ -119,6 +123,7 @@ func NewDashboardPanel(dashboardType DashboardType, parallel int, globalSpeeds *
 		if opts.Output != nil {
 			db.out = opts.Output
 		}
+		db.onProgress = opts.OnProgress
 	}
 	if db.activeSlots < 1 {
 		db.activeSlots = 1
@@ -211,7 +216,6 @@ func (db *DashboardPanel) UpdateTaskProgress(id string, downloaded, total, speed
 		return
 	}
 	db.mu.Lock()
-	defer db.mu.Unlock()
 	task := db.getOrCreateTaskLocked(id)
 	task.downloaded = downloaded
 	if total > 0 {
@@ -219,6 +223,13 @@ func (db *DashboardPanel) UpdateTaskProgress(id string, downloaded, total, speed
 	}
 	task.speed = speed
 	task.eta = eta
+	cb := db.onProgress
+	db.mu.Unlock()
+
+	// 回调放在锁外，避免外部实现（发事件、写网络）阻塞渲染
+	if cb != nil {
+		cb(id, downloaded, total, speed, eta)
+	}
 }
 
 // MarkTaskState 标记任务状态

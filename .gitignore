@@ -58,3 +58,9 @@ internal/webui/assets/dist/*
 docker/webui/.env
 docker/webui/config/
 docker/webui/downloads/
+
+# internal/log、internal/syncdrive 的测试里写死了 Windows 绝对路径（如
+# internal/syncdrive/bolt_db_test.go:16）。在 macOS/Linux 上 \ 是普通字符，
+# 整串会变成包目录下的一个文件名，跑 go test 就会留下这类垃圾文件。
+# gitignore 里 \ 是转义符，匹配字面反斜杠必须写成 \\。
+D:\\*

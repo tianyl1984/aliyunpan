@@ -40,7 +40,7 @@ const (
 )
 
 // progressThrottle 单文件字节进度的最小推送间隔。
-// 下载器每约 200ms 触发一次状态回调，多文件并发会打爆 SSE，必须节流。
+// 传输器每约 200ms 触发一次状态回调，多文件并发会打爆 SSE，必须节流。
 const progressThrottle = 500 * time.Millisecond
 
 // maxKeepJobs 内存中保留的终态任务数量上限
@@ -110,7 +110,7 @@ type taskRec struct {
 	Id string `json:"id"`
 	// Path 网盘路径（下载）或本地路径（上传）
 	Path string `json:"path"`
-	// LocalPath 本地落盘路径，下载时由探针用来读取分片临时文件的大小
+	// LocalPath 下载时的本地落盘路径
 	LocalPath string `json:"localPath,omitempty"`
 	Size      int64  `json:"size"`
 	Done      int64  `json:"done"`
@@ -168,8 +168,6 @@ type Job struct {
 	executor   *taskframework.TaskExecutor
 	spec       *JobSpec
 	mgr        *Manager
-	probeStop  chan struct{}
-	probeOnce  sync.Once
 	cancelOnce sync.Once
 	// onFinish 任务彻底结束后的清理钩子（关闭断点数据库、删除暂存文件等）
 	onFinish func()
@@ -236,7 +234,6 @@ func (m *Manager) newJob(spec *JobSpec, title string) (*Job, error) {
 		speeds:    &speeds.Speeds{},
 		spec:      spec,
 		mgr:       m,
-		probeStop: make(chan struct{}),
 	}
 	return j, nil
 }
@@ -480,8 +477,16 @@ func (j *Job) markTask(id, state, msg string) {
 	j.mgr.events.Publish(Event{Type: EventJobProgress, Data: j.Snapshot(false)})
 }
 
-// updateTaskProgress 由探针调用，带节流
-func (j *Job) updateTaskProgress(id string, done, speed int64) {
+// onPanelProgress 统计面板的进度钩子。
+//
+// 上传/下载任务单元本来就会把 (已传字节, 总字节, 速率) 报给 ui.DashboardPanel，
+// 这里直接借道同一份数据，无需另外去猜本地文件大小。
+func (j *Job) onPanelProgress(id string, done, total, speed int64, _ time.Duration) {
+	j.updateTaskProgress(id, done, total, speed)
+}
+
+// updateTaskProgress 更新单文件字节进度，带节流。total <= 0 表示总大小未知，沿用注册时的值。
+func (j *Job) updateTaskProgress(id string, done, total, speed int64) {
 	now := time.Now().UnixMilli()
 
 	j.mu.Lock()
@@ -489,6 +494,12 @@ func (j *Job) updateTaskProgress(id string, done, speed int64) {
 	if t == nil {
 		j.mu.Unlock()
 		return
+	}
+	if total > 0 {
+		t.Size = total
+	}
+	if t.Size > 0 && done > t.Size {
+		done = t.Size
 	}
 	t.Done = done
 	t.Speed = speed

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/tickstep/aliyunpan/internal/command"
 	"github.com/tickstep/aliyunpan/internal/config"
@@ -26,12 +27,15 @@ import (
 // 完全不写 os.Stdout（见 download_task_unit.go 的 OnDownloadStatusEvent 与 logf）。
 // 我们构造一个输出到 io.Discard 且从不调用 Start() 的面板：它不会渲染、不会起协程，
 // 只是把服务端进程的标准输出保持干净——这样网页控制台捕获 stdout 时不会混入传输日志。
-// 这个做法不需要修改 internal/functions 与 internal/ui 的任何一行代码。
-func silentPanel(t ui.DashboardType, parallel int, sp *speeds.Speeds) *ui.DashboardPanel {
+//
+// 同时挂上 OnProgress 钩子，把任务单元汇报给面板的字节级进度原样转发给 Job，
+// 这是网页端单文件进度条的唯一数据来源（上传与下载通用）。
+func silentPanel(t ui.DashboardType, parallel int, sp *speeds.Speeds, onProgress func(string, int64, int64, int64, time.Duration)) *ui.DashboardPanel {
 	return ui.NewDashboardPanel(t, parallel, sp, &ui.DashboardOptions{
 		Title:      "webui",
 		MaxHistory: 1,
 		Output:     io.Discard,
+		OnProgress: onProgress,
 	})
 }
 
@@ -108,7 +112,7 @@ func (m *Manager) SubmitDownload(u *config.PanUser, spec *JobSpec) (*Job, error)
 	executor.SetParallel(parallel)
 	statistic := &pandownload.DownloadStatistic{}
 	statistic.StartTimer()
-	panel := silentPanel(ui.DashboardPanelDownload, parallel, job.speeds)
+	panel := silentPanel(ui.DashboardPanelDownload, parallel, job.speeds, job.onPanelProgress)
 	fileRecorder := log.NewFileRecorder(config.GetLogDir() + "/download_file_records.csv")
 
 	client := u.PanClient().OpenapiPanClient()

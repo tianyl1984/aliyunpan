@@ -21,7 +21,7 @@ type wrappedUnit struct {
 	id string
 	// panPath 展示用路径（下载是网盘路径，上传是本地路径）
 	panPath string
-	// localPath 下载时的本地落盘路径，供进度探针读取分片临时文件
+	// localPath 下载时的本地落盘路径，展示用
 	localPath string
 	size      int64
 }
@@ -45,9 +45,6 @@ func (w *wrappedUnit) Run() (result *taskframework.TaskUnitRunResult) {
 	}
 
 	w.job.markTask(w.id, TaskRunning, "")
-	stop := w.job.startProbe(w.id)
-	defer stop()
-
 	return w.inner.Run()
 }
 

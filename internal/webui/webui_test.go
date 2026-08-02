@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/tickstep/aliyunpan/internal/ui"
 )
 
 func TestCleanPanPath(t *testing.T) {
@@ -378,5 +380,35 @@ func TestHostAllowedDefaultPort(t *testing.T) {
 	}
 	if p80.hostAllowed("https", "192.168.1.10") {
 		t.Error(`监听 80 端口时 https 来源（隐含 443）应为 false`)
+	}
+}
+
+// 统计面板是网页端单文件进度的唯一来源，这条链路断了就会出现
+// 「速度正常但进度一直是 0」，必须有测试兜住。
+func TestPanelProgressReachesSnapshot(t *testing.T) {
+	m := NewManager(NewEventBroker(), func(string, ...interface{}) {})
+	job, err := m.newJob(&JobSpec{Type: JobDownload}, "t")
+	if err != nil {
+		t.Fatalf("newJob 失败: %v", err)
+	}
+	job.state = JobRunning
+	job.registerTask("1", "/a.bin", "/tmp/a.bin", 1000)
+	job.markTask("1", TaskRunning, "")
+
+	panel := silentPanel(ui.DashboardPanelDownload, 1, job.speeds, job.onPanelProgress)
+	panel.UpdateTaskProgress("1", 400, 1000, 128, time.Second)
+
+	snap := job.Snapshot(true)
+	if snap.BytesDone != 400 || snap.BytesTotal != 1000 {
+		t.Fatalf("任务级进度 = %d/%d, want 400/1000", snap.BytesDone, snap.BytesTotal)
+	}
+	if len(snap.Tasks) != 1 || snap.Tasks[0].Done != 400 || snap.Tasks[0].Speed != 128 {
+		t.Fatalf("单文件进度未透传: %+v", snap.Tasks)
+	}
+
+	// 总大小以传输器上报的为准；已传字节不得超过总大小
+	panel.UpdateTaskProgress("1", 9999, 2000, 0, 0)
+	if snap = job.Snapshot(true); snap.BytesDone != 2000 || snap.BytesTotal != 2000 {
+		t.Fatalf("进度 = %d/%d, want 2000/2000", snap.BytesDone, snap.BytesTotal)
 	}
 }

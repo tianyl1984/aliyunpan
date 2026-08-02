@@ -18,7 +18,6 @@ func (m *Manager) runJob(j *Job) {
 				m.logf("传输任务 %s 发生 panic: %v", j.Id, r)
 				j.setState(JobFailed, fmt.Sprintf("内部错误: %v", r))
 			}
-			j.stopAllProbes()
 			if j.onFinish != nil {
 				j.onFinish()
 			}
