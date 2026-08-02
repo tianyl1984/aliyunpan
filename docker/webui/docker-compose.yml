@@ -18,12 +18,16 @@ services:
       dockerfile: docker/webui/Dockerfile
       args:
         VERSION: v0.4.0
-        # 连不上 Docker Hub / npmjs 时，整体换成镜像站再构建
+        # Go 模块代理。国内直连 proxy.golang.org 会超时，默认走七牛的镜像。
+        # 只在构建期生效（go mod download），改完要 docker compose build 才会重来。
+        # 想直连改成 direct；公司内网私服就填自己的地址。
+        GOPROXY: https://goproxy.cn,direct
+        # npm 源，同样只在构建期用于装前端依赖
+        NPM_REGISTRY: https://registry.npmmirror.com
+        # 连不上 Docker Hub 时，基础镜像也整体换成镜像站再构建
         #NODE_IMAGE: <镜像站>/node:20-alpine
         #GO_IMAGE: <镜像站>/golang:1.24-alpine
         #RUNTIME_IMAGE: <镜像站>/alpine:3.21
-        #NPM_REGISTRY: https://registry.npmmirror.com
-        #GOPROXY: https://goproxy.cn,direct
     image: aliyunpan-webui:local
     container_name: aliyunpan-webui
     restart: unless-stopped
