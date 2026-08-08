@@ -368,7 +368,7 @@ cd web && npm ci && npm run build     # 产物与 GOOS/GOARCH 无关，跨平台
 | 项 | 措施 |
 |---|---|
 | 监听地址 | 默认 `--host 127.0.0.1`。非回环时强制要求已设密码，否则**拒绝启动**并打印说明 |
-| 认证 | `--password` 或首次自动生成随机 token 打印到终端（存 `<configDir>/webui.json`，0600）。会话 Cookie `HttpOnly; SameSite=Strict; Secure(TLS 时)`，存内存，默认 7 天。密码只存 bcrypt/scrypt 哈希 |
+| 认证 | 两种方式并存。① token/口令：`--password` 或首次自动生成随机 token 打印到终端（存 `<configDir>/webui.json`，0600）。② 第三方登录：`--auth-url` 接入外部认证服务，见下节。会话 Cookie `HttpOnly; SameSite=Strict; Secure(TLS 时)`，存内存，默认 7 天。密码只存 bcrypt/scrypt 哈希 |
 | 暴力破解 | 登录接口按 IP 限速（失败 5 次锁 5 分钟） |
 | CSRF | 三重：`SameSite=Strict` + 写操作校验 `Origin`/`Referer` + 要求自定义头 `X-Aliyunpan-Client`（简单请求带不了 → 触发预检） |
 | SSE 认证 | 走 Cookie（`EventSource` 唯一选择）。**不要**用 URL query 传 token（会进日志） |
@@ -378,6 +378,62 @@ cd web && npm ci && npm run build     # 产物与 GOOS/GOARCH 无关，跨平台
 | `run` / `tool enc,dec` | 默认 deny；`run` 需 `--allow-shell` 且监听回环 |
 | 敏感数据 | `/api/config` 与 `/api/account/*` **绝不返回** `openapiToken`/`webapiToken`/`ClientSecret`；写接口字段白名单，禁止反序列化整个 `PanConfig` |
 | TLS | 可选 `--tls-cert/--tls-key`；非回环时提示置于反代之后 |
+
+### 十之二、第三方登录（`internal/webui/auth_oauth.go`）
+
+把身份校验委托给外部认证服务 [cf-worker-auth](https://github.com/tianyl1984/cf-worker-auth)（Cloudflare Worker + GitHub OAuth）。
+**token/口令登录始终保留**，第三方登录是并列的第二个入口，只有配了 `--auth-url` 才出现。
+webui 侧不接触 GitHub OAuth，不需要 client secret，也不引入任何新的 Go 依赖。
+
+```
+浏览器                         aliyunpan webui                认证服务
+  │ 1. 点「使用 GitHub 登录」        │                            │
+  │ ─ GET /api/auth/oauth/start ──▶│ 生成 state，种 Lax Cookie   │
+  │ ◀────── 302 ───────────────────│                            │
+  │ 2. GET <auth>/login?callback=<external>/api/auth/oauth/callback/<state> ─▶│
+  │ 3. GitHub 授权 + 认证服务校验 legal_user 白名单               │
+  │ ◀────── 302 到 callback?token=xxx ────────────────────────────│
+  │ 4. GET /api/auth/oauth/callback/<state>?token=xxx ─▶│         │
+  │                                 │ 5. GET <auth>/userinfo ───▶│
+  │                                 │    (token 走 Bearer 头)    │
+  │                                 │ 6. 校验 --auth-user 白名单  │
+  │ ◀── 302 到站内页面 + 会话 Cookie ─│                            │
+```
+
+| 关键点 | 说明 |
+|---|---|
+| state 走路径而非 query | 认证服务回调时固定拼 `?token=xxx`，回调地址自身**不能再带 query**，否则参数会被拼坏。故回调地址形如 `.../callback/<state>` |
+| state Cookie 是 `SameSite=Lax` | 认证服务是跨站 302 跳回来的，`Strict` 的 Cookie 在跨站顶级导航里不会被带上。会话 Cookie 仍然是 `Strict` |
+| state 一次性 | 存服务端内存，`consume` 即删，过期 10 分钟，同时在场上限 512 个 |
+| 回调地址推导 | 优先 `--external-url`；没配就用请求 `Host`，但必须通过 `originAllowed`（指向监听地址或已被 `--trusted-origin` 声明），否则伪造 Host 头就能把回调指到别处。反代终止 TLS 时额外试一次 `https` |
+| `--external-url` 自动并入可信来源 | 免得用户还要再写一遍 `--trusted-origin` |
+| 二次白名单 | `--auth-user` 可再限一层；不配则完全信任认证服务自身的 `legal_user` |
+| 登录后跳转 | `redirect` 只接受站内绝对路径（拒 `//`、`/\`、绝对 URL、CRLF、超长），避免变成开放重定向 |
+| 出错处理 | 回调是浏览器整页导航，不能返回 JSON，一律 302 回 `/login?error=<原因>` 由前端弹 toast |
+| 部署前提 | `--external-url` 的域名要加进认证服务 KV 的 `legal_domain`，登录用户要在 `legal_user` 里 |
+
+启动示例：
+
+```sh
+aliyunpan webui --host 0.0.0.0 \
+  --external-url https://pan.example.com \
+  --auth-url https://auth.example.com \
+  --auth-user your-github-id
+```
+
+监听非回环地址的强制凭据检查也随之放宽：`--password` **或** `--auth-url` 满足其一即可。
+
+Docker 部署下这三个参数由 `docker/webui/entrypoint.sh` 从环境变量翻译过来
+（`webui` 命令本身只认命令行参数，不读环境变量）：
+
+| 环境变量 | 对应参数 |
+|---|---|
+| `ALIYUNPAN_WEBUI_EXTERNAL_URL` | `--external-url` |
+| `ALIYUNPAN_WEBUI_AUTH_URL` | `--auth-url` |
+| `ALIYUNPAN_WEBUI_AUTH_USERS` | `--auth-user`（逗号分隔，逐个展开） |
+
+entrypoint 的口令强制检查同步放宽为「`ALIYUNPAN_WEBUI_PASSWORD` 或 `ALIYUNPAN_WEBUI_AUTH_URL` 二选一」，
+并在启用第三方登录却没设 `EXTERNAL_URL` 时告警 —— 容器场景下回调地址几乎不可能靠请求 Host 推导正确。
 
 ---
 
@@ -453,4 +509,48 @@ cd web && npm ci && npm run build     # 产物与 GOOS/GOARCH 无关，跨平台
 1. **唯一需要跟进上游的地方**是 `internal/webui/transfer_download.go` 与 `transfer_upload.go` 里复制的参数装配逻辑（同步自 `internal/command/download.go` 的 `RunDownload` 和 `upload.go` 的 `RunUpload` @ v0.4.0）。上游若调整并发策略或 `downloader.Config` / `UploadTaskUnit` 的字段，需要手工同步。两个文件顶部都有注释标注来源。
 2. **前端改动后必须重新构建并提交 dist**：`./build_web.sh` → `go build`。`//go:embed all:assets/dist` 在目录为空时会编译失败。
 3. **认证凭据**：不带 `--password` 启动时，token 存在 `<configDir>/webui.json`（0600，明文）。这与配置文件里本来就明文存放 OAuth token 的做法一致；带 `--password` 时只存派生哈希，不存明文。
-4. **已知的权限边界**：网页控制台等价于完整的 CLI 权限（可以执行 `download -saveto <任意路径>`），因此 `--local-root` 白名单只约束图形界面的文件浏览与传输接口，不约束控制台。这是设计使然 —— 控制台的定位就是「兜底的完整 CLI」，它的防线是访问认证本身。
+4. **第三方登录只碰 fork 自己的文件**：新增 `internal/webui/auth_oauth.go`，改动 `auth.go`（会话结构加 `user` 字段）、`router.go`、`server.go`、`middleware.go`、`webui.go` 与前端三个文件。上游文件仍然零改动，`go.mod` 仍然零改动。
+5. **已知的权限边界**：网页控制台等价于完整的 CLI 权限（可以执行 `download -saveto <任意路径>`），因此 `--local-root` 白名单只约束图形界面的文件浏览与传输接口，不约束控制台。这是设计使然 —— 控制台的定位就是「兜底的完整 CLI」，它的防线是访问认证本身。
+
+---
+
+## 实施记录（2026-08-08）：第三方登录
+
+在原有 token/口令登录之外新增第二种登录方式，接入 cf-worker-auth。设计与安全要点见 §十之二。
+
+### 改动清单
+
+| 文件 | 改动 |
+|---|---|
+| `internal/webui/auth_oauth.go` | **新增**。`oauthManager`（state 生命周期、认证服务客户端、白名单）+ start/callback 两个处理器 + 回调地址推导 |
+| `internal/webui/auth.go` | 会话由 `map[string]time.Time` 改为 `map[string]*session`，多带一个 `user` 字段；抽出 `newSession`（不校验凭据建会话）与 `lookup` |
+| `internal/webui/router.go` | 注册 `GET /api/auth/oauth/start` 与 `GET /api/auth/oauth/callback/{state}` |
+| `internal/webui/middleware.go` | `/api/auth/status` 增加 `user` 与 `oauth` 字段，供登录页决定是否显示按钮 |
+| `internal/webui/server.go` | 构造 `oauthManager`；`--external-url` 并入可信来源；banner 打印认证服务与回调地址 |
+| `internal/webui/webui.go` | 新增 `--auth-url` / `--auth-user` / `--external-url` 三个 flag；非回环地址的凭据检查放宽为「口令或认证服务二选一」 |
+| `web/src/stores/index.js` | auth store 增加 `user` / `oauth` / `loginExternal` |
+| `web/src/views/LoginView.vue` | 分隔线 + 第三方登录按钮（仅服务端启用时显示）；读 `?error=` 弹 toast 并清掉 query |
+| `web/src/App.vue` | 侧栏显示当前 Web 登录者 |
+| `docker/webui/entrypoint.sh` | 三个新环境变量翻译成参数；口令检查放宽为「口令或认证服务二选一」；缺 `EXTERNAL_URL` 时告警 |
+| `docker/webui/docker-compose.yml` | 透传三个新变量；`ALIYUNPAN_WEBUI_PASSWORD` 由 `:?`（缺失即报错）改为可空，交给 entrypoint 统一判断 |
+| `docker/webui/.env.example` | 补齐三个新变量与认证服务侧的 `legal_domain` / `legal_user` 前置条件 |
+
+### 验证结果
+
+`go build ./...`、`go vet`、`gofmt` 干净；`go test ./internal/webui/` 通过（新增 6 个用例，覆盖服务地址规范化、redirect 清洗、state 生命周期与重放、回调地址推导）。
+
+用一个模拟 cf-worker-auth 的桩服务做了端到端实测，均符合预期：
+
+- 完整流程：start → 认证服务 → 回调 → 种会话 → 跳回 `redirect` 指定的站内页面，`/api/auth/status` 返回 `user`。
+- **token/口令登录不受影响**，错误口令仍然返回「口令错误」并计入限速。
+- 伪造回调（无 state Cookie）、state 重放、认证服务返回 401 → 均 302 回登录页并带错误原因。
+- `--auth-user` 白名单外的用户被拒，日志记录被拒用户名。
+- `redirect=//evil.com` / `https://evil.com` 被清洗成站内首页。
+- 伪造 `Host: evil.com` 时拒绝推导回调地址，返回 400 并提示用 `--external-url`。
+- 已登录状态下访问 start 直接 302 回首页，不重复发起流程。
+
+Docker 侧把 `entrypoint.sh` 的 `exec` 换成打印后逐组合模拟，参数拼装均正确：只有口令、只有认证服务、
+两者并存、缺 `EXTERNAL_URL` 告警、两者都缺时退出码 1、只设 `AUTH_USERS` 未设 `AUTH_URL` 告警；
+`AUTH_USERS` 里的空格与空项被正确清洗。`docker compose config` 通过。
+
+未实测：真实 GitHub OAuth 往返（需要真实的 Worker 部署与 OAuth App）、容器内实跑。

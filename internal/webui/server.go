@@ -17,8 +17,10 @@ import (
 
 // Server webui 的 HTTP 服务
 type Server struct {
-	opt        *Options
-	auth       *authManager
+	opt  *Options
+	auth *authManager
+	// oauth 第三方登录。未配置 --auth-url 时为 nil，表示只保留 token/口令登录
+	oauth      *oauthManager
 	events     *EventBroker
 	transfer   *Manager
 	console    *Console
@@ -62,10 +64,29 @@ func NewServer(opt *Options) (*Server, error) {
 		return nil, err
 	}
 
+	// 对外地址天然就是可信来源，自动并入，省得用户还要再写一遍 --trusted-origin
+	if opt.ExternalURL != "" {
+		ext, eErr := normalizeExternalURL(opt.ExternalURL)
+		if eErr != nil {
+			return nil, fmt.Errorf("非法的对外访问地址 %q: %w", opt.ExternalURL, eErr)
+		}
+		opt.ExternalURL = ext
+		trusted, err = normalizeTrustedOrigins(append(trusted, ext))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	oauth, err := newOAuthManager(opt)
+	if err != nil {
+		return nil, err
+	}
+
 	events := NewEventBroker()
 	s := &Server{
 		opt:            opt,
 		auth:           auth,
+		oauth:          oauth,
 		events:         events,
 		uploads:        newUploadSessionStore(),
 		localRoots:     roots,
@@ -172,6 +193,18 @@ func (s *Server) printBanner() {
 		fmt.Fprintln(s.logOut, "  (已保存到 "+webuiConfigPath()+"，下次启动复用)")
 	} else {
 		fmt.Fprintln(s.logOut, "  访问口令: 使用 --password 指定的口令")
+	}
+	if s.oauth != nil {
+		fmt.Fprintln(s.logOut, "  第三方登录: 已启用，认证服务 "+s.oauth.baseURL)
+		if s.opt.ExternalURL != "" {
+			fmt.Fprintln(s.logOut, "  回调地址: "+s.opt.ExternalURL+oauthCallbackPrefix+"<state>")
+			fmt.Fprintln(s.logOut, "  (请确认该域名已加入认证服务的 legal_domain 白名单)")
+		} else {
+			fmt.Fprintln(s.logOut, "  回调地址: 从请求 Host 推导。经反向代理访问时建议用 --external-url 显式指定")
+		}
+		if len(s.oauth.allowUsers) > 0 {
+			fmt.Fprintln(s.logOut, "  允许登录的用户: "+strings.Join(sortedKeys(s.oauth.allowUsers), ", "))
+		}
 	}
 	if len(s.trustedOrigins) > 0 {
 		fmt.Fprintln(s.logOut, "  可信来源: "+strings.Join(s.trustedOrigins, ", "))

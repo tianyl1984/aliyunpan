@@ -9,18 +9,19 @@
 # 变成 /app 下的文件名），必须禁用。脚本本身不依赖通配符。
 set -ef
 
-# ---- 访问口令 ----
-# 容器必须监听 0.0.0.0，而 RunWebUI 对非回环地址强制要求口令，
-# 所以这里没有"不设口令"的选项，缺失就直接失败，而不是启动一个裸奔的服务。
+# ---- 访问凭据 ----
+# 容器必须监听 0.0.0.0，而 RunWebUI 对非回环地址强制要求「口令」或「第三方认证服务」
+# 二选一，所以这里没有"两个都不设"的选项，都缺就直接失败，而不是启动一个裸奔的服务。
 if [ -n "$ALIYUNPAN_WEBUI_PASSWORD_FILE" ] && [ -f "$ALIYUNPAN_WEBUI_PASSWORD_FILE" ]; then
     ALIYUNPAN_WEBUI_PASSWORD=$(cat "$ALIYUNPAN_WEBUI_PASSWORD_FILE")
 fi
 
-if [ -z "$ALIYUNPAN_WEBUI_PASSWORD" ]; then
-    echo "错误: 必须设置访问口令。" >&2
+if [ -z "$ALIYUNPAN_WEBUI_PASSWORD" ] && [ -z "$ALIYUNPAN_WEBUI_AUTH_URL" ]; then
+    echo "错误: 必须设置访问口令，或接入第三方认证服务。" >&2
     echo "  在 docker-compose.yml 同级建一个 .env 文件写入:" >&2
     echo "    ALIYUNPAN_WEBUI_PASSWORD=你的口令" >&2
     echo "  或使用 docker secret，指定 ALIYUNPAN_WEBUI_PASSWORD_FILE=/run/secrets/xxx" >&2
+    echo "  或改用第三方登录，指定 ALIYUNPAN_WEBUI_AUTH_URL=https://auth.example.com" >&2
     exit 1
 fi
 
@@ -33,8 +34,12 @@ ROOTS="${ALIYUNPAN_WEBUI_LOCAL_ROOTS:-/data}"
 
 set -- webui \
     --host 0.0.0.0 \
-    --port "$PORT" \
-    --password "$ALIYUNPAN_WEBUI_PASSWORD"
+    --port "$PORT"
+
+# 口令可以缺席（此时只剩第三方登录 + 自动生成的 token）
+if [ -n "$ALIYUNPAN_WEBUI_PASSWORD" ]; then
+    set -- "$@" --password "$ALIYUNPAN_WEBUI_PASSWORD"
+fi
 
 # 逗号分隔，逐个转成 --local-root。
 # 目录不存在时 webui 不会报错，但网页里点进去会失败，所以先建出来。
@@ -66,6 +71,43 @@ if [ -n "$ALIYUNPAN_WEBUI_TRUSTED_ORIGINS" ]; then
     done
     IFS="$OLD_IFS"
     echo "可信来源: $ALIYUNPAN_WEBUI_TRUSTED_ORIGINS"
+fi
+
+# ---- 对外访问地址（可选）----
+# 浏览器实际访问本服务用的地址。第三方登录靠它拼回调地址，不设就只能从请求 Host 推导。
+# 设置后会自动并入可信来源，不必再在 TRUSTED_ORIGINS 里重复一遍。
+if [ -n "$ALIYUNPAN_WEBUI_EXTERNAL_URL" ]; then
+    set -- "$@" --external-url "$ALIYUNPAN_WEBUI_EXTERNAL_URL"
+    echo "对外访问地址: $ALIYUNPAN_WEBUI_EXTERNAL_URL"
+fi
+
+# ---- 第三方登录（可选）----
+# 把身份校验委托给外部认证服务（cf-worker-auth）。token/口令登录不受影响，两种方式并存。
+# 认证服务侧要把上面 EXTERNAL_URL 的域名加进 legal_domain 白名单，否则跳过去就报错。
+if [ -n "$ALIYUNPAN_WEBUI_AUTH_URL" ]; then
+    set -- "$@" --auth-url "$ALIYUNPAN_WEBUI_AUTH_URL"
+    echo "第三方登录: 已启用，认证服务 $ALIYUNPAN_WEBUI_AUTH_URL"
+    if [ -z "$ALIYUNPAN_WEBUI_EXTERNAL_URL" ]; then
+        echo "警告: 未设置 ALIYUNPAN_WEBUI_EXTERNAL_URL，回调地址将从请求 Host 推导。" >&2
+        echo "      经反向代理或端口映射访问时，多半会因为推导不出来而登录失败。" >&2
+    fi
+
+    # 本端的二次白名单，逗号分隔。不填则完全信任认证服务自身的 legal_user 白名单。
+    if [ -n "$ALIYUNPAN_WEBUI_AUTH_USERS" ]; then
+        OLD_IFS="$IFS"
+        IFS=','
+        for u in $ALIYUNPAN_WEBUI_AUTH_USERS; do
+            IFS="$OLD_IFS"
+            u=$(printf '%s' "$u" | tr -d '[:space:]')
+            [ -z "$u" ] && { IFS=','; continue; }
+            set -- "$@" --auth-user "$u"
+            IFS=','
+        done
+        IFS="$OLD_IFS"
+        echo "允许登录的用户: $ALIYUNPAN_WEBUI_AUTH_USERS"
+    fi
+elif [ -n "$ALIYUNPAN_WEBUI_AUTH_USERS" ]; then
+    echo "警告: 设置了 ALIYUNPAN_WEBUI_AUTH_USERS 但没设 ALIYUNPAN_WEBUI_AUTH_URL，第三方登录未启用，该白名单不会生效" >&2
 fi
 
 # ---- 可选 TLS ----

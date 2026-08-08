@@ -1,9 +1,11 @@
 package webui
 
 import (
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -453,5 +455,152 @@ func TestPanelRegistersExpandedSubTasks(t *testing.T) {
 	panel.RegisterTask("2", "/dir/a.bin", 600, true)
 	if snap = job.Snapshot(false); snap.BytesDone != 700 {
 		t.Fatalf("重复登记后进度被重置: %d", snap.BytesDone)
+	}
+}
+
+// ---- 第三方登录 ----
+
+func TestNormalizeServiceURL(t *testing.T) {
+	ok := map[string]string{
+		"https://auth.example.com":       "https://auth.example.com",
+		"https://AUTH.Example.com/":      "https://auth.example.com",
+		"https://auth.example.com:443":   "https://auth.example.com",
+		"http://auth.example.com:80":     "http://auth.example.com",
+		"http://192.168.1.10:9000":       "http://192.168.1.10:9000",
+		"  https://auth.example.com/a/ ": "https://auth.example.com/a",
+	}
+	for in, want := range ok {
+		got, err := normalizeServiceURL(in)
+		if err != nil {
+			t.Errorf("normalizeServiceURL(%q) 报错: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("normalizeServiceURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	bad := []string{"", "auth.example.com", "ftp://auth.example.com", "https://", "https://a.com?x=1"}
+	for _, in := range bad {
+		if got, err := normalizeServiceURL(in); err == nil {
+			t.Errorf("normalizeServiceURL(%q) = %q, 期望报错", in, got)
+		}
+	}
+}
+
+func TestNormalizeExternalURL(t *testing.T) {
+	if got, err := normalizeExternalURL("https://pan.example.com/"); err != nil || got != "https://pan.example.com" {
+		t.Errorf("normalizeExternalURL = %q, %v", got, err)
+	}
+	// 对外地址带子路径拼出来的回调地址一定是错的，必须拒绝
+	if _, err := normalizeExternalURL("https://pan.example.com/webui"); err == nil {
+		t.Error("带路径的对外地址应当报错")
+	}
+}
+
+func TestSanitizeRedirect(t *testing.T) {
+	cases := map[string]string{
+		"/files":           "/files",
+		"/files?a=1":       "/files?a=1",
+		"":                 "",
+		"files":            "",
+		"//evil.com":       "", // 协议相对 URL，会跳到外站
+		"/\\evil.com":      "", // 部分浏览器等价于 //
+		"https://evil.com": "",
+		"/files\r\nSet-":   "",
+	}
+	for in, want := range cases {
+		if got := sanitizeRedirect(in); got != want {
+			t.Errorf("sanitizeRedirect(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := sanitizeRedirect("/" + strings.Repeat("a", 600)); got != "" {
+		t.Errorf("超长 redirect 应被丢弃, got %q", got)
+	}
+}
+
+func TestOAuthStateLifecycle(t *testing.T) {
+	o, err := newOAuthManager(&Options{AuthURL: "https://auth.example.com", AuthUsers: []string{" Octocat ", ""}})
+	if err != nil {
+		t.Fatalf("newOAuthManager 报错: %v", err)
+	}
+
+	state, err := o.begin("/files")
+	if err != nil {
+		t.Fatalf("begin 报错: %v", err)
+	}
+	st, ok := o.consume(state)
+	if !ok || st.redirect != "/files" {
+		t.Fatalf("consume = %v, %v", st, ok)
+	}
+	// state 只能用一次，重放必须失败
+	if _, ok := o.consume(state); ok {
+		t.Error("同一个 state 被消费了两次")
+	}
+	if _, ok := o.consume(""); ok {
+		t.Error("空 state 不应通过")
+	}
+
+	// 过期的 state 同样不能用
+	expired, _ := o.begin("")
+	o.states[expired].expire = time.Now().Add(-time.Second)
+	if _, ok := o.consume(expired); ok {
+		t.Error("过期 state 不应通过")
+	}
+
+	// 白名单大小写与空白无关
+	if !o.allowed("octocat") || !o.allowed("OCTOCAT") {
+		t.Error("白名单内的用户被拒绝")
+	}
+	if o.allowed("torvalds") {
+		t.Error("白名单外的用户被放行")
+	}
+}
+
+func TestOAuthDisabledAndUnrestricted(t *testing.T) {
+	// 未配置 --auth-url：不启用第三方登录
+	o, err := newOAuthManager(&Options{})
+	if err != nil || o != nil {
+		t.Fatalf("未配置认证服务时应返回 nil, got %v, %v", o, err)
+	}
+	if _, err := newOAuthManager(&Options{AuthURL: "auth.example.com"}); err == nil {
+		t.Error("非法的认证服务地址应当报错")
+	}
+	// 配了服务但没配 --auth-user：完全信任认证服务自身的白名单
+	o, err = newOAuthManager(&Options{AuthURL: "https://auth.example.com"})
+	if err != nil {
+		t.Fatalf("newOAuthManager 报错: %v", err)
+	}
+	if !o.allowed("anyone") {
+		t.Error("未配置 --auth-user 时不应在本端拦截")
+	}
+	if got := o.loginURL("https://pan.example.com/api/auth/oauth/callback/abc"); got !=
+		"https://auth.example.com/login?callback=https%3A%2F%2Fpan.example.com%2Fapi%2Fauth%2Foauth%2Fcallback%2Fabc" {
+		t.Errorf("loginURL = %q", got)
+	}
+}
+
+func TestExternalBase(t *testing.T) {
+	// 显式配置优先
+	s := &Server{opt: &Options{Host: "127.0.0.1", Port: 8080, ExternalURL: "https://pan.example.com"}}
+	if got, err := s.externalBase(&http.Request{Host: "evil.com"}); err != nil || got != "https://pan.example.com" {
+		t.Errorf("externalBase = %q, %v", got, err)
+	}
+
+	// 未配置时从 Host 推导，但必须指向本服务
+	s = &Server{opt: &Options{Host: "127.0.0.1", Port: 8080}}
+	if got, err := s.externalBase(&http.Request{Host: "127.0.0.1:8080"}); err != nil || got != "http://127.0.0.1:8080" {
+		t.Errorf("externalBase = %q, %v", got, err)
+	}
+	// 伪造的 Host 头不能把回调地址指到别处
+	if got, err := s.externalBase(&http.Request{Host: "evil.com"}); err == nil {
+		t.Errorf("伪造 Host 应当报错, got %q", got)
+	}
+
+	// 反代终止 TLS：监听侧是 http，对外是 https，靠 --trusted-origin 认出来
+	trusted, _ := normalizeTrustedOrigins([]string{"https://pan.example.com"})
+	s = &Server{opt: &Options{Host: "0.0.0.0", Port: 8080}, trustedOrigins: trusted}
+	if got, err := s.externalBase(&http.Request{Host: "pan.example.com"}); err != nil || got != "https://pan.example.com" {
+		t.Errorf("externalBase = %q, %v", got, err)
 	}
 }

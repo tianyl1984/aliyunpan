@@ -6,13 +6,20 @@ import { onEvent, onReconnect } from '../api/events'
 export const useAuthStore = defineStore('auth', () => {
   const authenticated = ref(false)
   const checked = ref(false)
+  // user 第三方登录时的用户名，token/口令登录为空
+  const user = ref('')
+  // oauth 服务端启用第三方登录时为 { enabled, provider, startUrl }，否则为 null
+  const oauth = ref(null)
 
   async function check() {
     try {
       const d = await api.authStatus()
       authenticated.value = !!d.authenticated
+      user.value = d.user || ''
+      oauth.value = d.oauth?.enabled ? d.oauth : null
     } catch {
       authenticated.value = false
+      user.value = ''
     } finally {
       checked.value = true
     }
@@ -22,6 +29,14 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(password) {
     await api.authLogin(password)
     authenticated.value = true
+    user.value = ''
+  }
+
+  // 第三方登录走整页跳转：回调要落在服务端才能种 Cookie，fetch 做不到
+  function loginExternal(redirect) {
+    if (!oauth.value) return
+    const q = redirect ? `?redirect=${encodeURIComponent(redirect)}` : ''
+    window.location.href = oauth.value.startUrl + q
   }
 
   async function logout() {
@@ -29,10 +44,11 @@ export const useAuthStore = defineStore('auth', () => {
       await api.authLogout()
     } finally {
       authenticated.value = false
+      user.value = ''
     }
   }
 
-  return { authenticated, checked, check, login, logout }
+  return { authenticated, user, oauth, checked, check, login, loginExternal, logout }
 })
 
 export const useAccountStore = defineStore('account', () => {

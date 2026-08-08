@@ -62,9 +62,9 @@ services:
 
     environment:
       - TZ=Asia/Shanghai
-      # （必须）Web 访问口令。容器监听 0.0.0.0，程序强制要求设口令，缺失会拒绝启动。
-      # 值放在同目录的 .env 文件里，不要直接写在这里。
-      - ALIYUNPAN_WEBUI_PASSWORD=${ALIYUNPAN_WEBUI_PASSWORD:?请先创建 .env 并设置 ALIYUNPAN_WEBUI_PASSWORD}
+      # Web 访问口令。容器监听 0.0.0.0，程序要求「口令」或「第三方认证服务」至少有一个，
+      # 两个都不设会被 entrypoint 拒绝启动。值放在同目录的 .env 文件里，不要直接写在这里。
+      - ALIYUNPAN_WEBUI_PASSWORD=${ALIYUNPAN_WEBUI_PASSWORD:-}
       # 容器内的监听端口
       - ALIYUNPAN_WEBUI_PORT=8080
 
@@ -82,6 +82,15 @@ services:
       # 允许在网页里浏览的容器内目录，逗号分隔，必须与上面 volumes 的容器侧路径对应
       - ALIYUNPAN_WEBUI_LOCAL_ROOTS=/data
       #- ALIYUNPAN_WEBUI_LOCAL_ROOTS=/data,/media
+
+      # ---- 第三方登录（可选，全部在 .env 里配）----
+      # 对外访问地址。第三方登录靠它拼回调地址；设了会自动并入可信来源，
+      # 所以填了这个就不必再在 TRUSTED_ORIGINS 里重复写一遍同一个地址。
+      - ALIYUNPAN_WEBUI_EXTERNAL_URL=${ALIYUNPAN_WEBUI_EXTERNAL_URL:-}
+      # 认证服务地址。留空则只保留 token/口令登录。
+      - ALIYUNPAN_WEBUI_AUTH_URL=${ALIYUNPAN_WEBUI_AUTH_URL:-}
+      # 允许通过第三方登录的用户名，逗号分隔。留空则完全信任认证服务自身的白名单。
+      - ALIYUNPAN_WEBUI_AUTH_USERS=${ALIYUNPAN_WEBUI_AUTH_USERS:-}
 
       # （可选）容器内直接跑 HTTPS。一般建议交给反向代理，这里留个口子。
       #- ALIYUNPAN_WEBUI_TLS_CERT=/config/tls/fullchain.pem

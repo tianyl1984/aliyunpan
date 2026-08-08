@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore, useToastStore } from '../stores'
 
@@ -12,14 +12,24 @@ const password = ref('')
 const busy = ref(false)
 const input = ref(null)
 
-onMounted(() => input.value?.focus())
+const redirect = computed(() => route.query.redirect || '/files')
+
+onMounted(() => {
+  // 第三方登录失败时服务端会 302 回这里并把原因带在 query 上
+  const err = route.query.error
+  if (err) {
+    toast.error(String(err))
+    router.replace({ name: 'login', query: { ...route.query, error: undefined } })
+  }
+  input.value?.focus()
+})
 
 async function submit() {
   if (busy.value) return
   busy.value = true
   try {
     await auth.login(password.value)
-    router.push(route.query.redirect || '/files')
+    router.push(redirect.value)
   } catch (e) {
     toast.error(e.message)
     password.value = ''
@@ -50,7 +60,35 @@ async function submit() {
             {{ busy ? '登录中…' : '登录' }}
           </button>
         </form>
+
+        <template v-if="auth.oauth">
+          <div class="login-sep"><span>或</span></div>
+          <button class="btn" style="width: 100%" @click="auth.loginExternal(redirect)">
+            使用 {{ auth.oauth.provider }} 登录
+          </button>
+          <p class="muted small" style="margin-bottom: 0">
+            将跳转到认证服务完成授权，仅白名单用户可登录。
+          </p>
+        </template>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.login-sep {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 18px 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.login-sep::before,
+.login-sep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+</style>

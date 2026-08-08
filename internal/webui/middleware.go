@@ -182,10 +182,23 @@ func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
 // ---- 认证接口 ----
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) error {
-	return writeOKErr(w, map[string]interface{}{
-		"authenticated": s.auth.valid(sessionIDFromRequest(r)),
+	sess, ok := s.auth.lookup(sessionIDFromRequest(r))
+	data := map[string]interface{}{
+		"authenticated": ok,
 		"clientHeader":  clientHeader,
-	})
+	}
+	if ok && sess.user != "" {
+		data["user"] = sess.user
+	}
+	// 登录页据此决定是否显示第三方登录按钮
+	if s.oauth != nil {
+		data["oauth"] = map[string]interface{}{
+			"enabled":  true,
+			"provider": oauthProvider,
+			"startUrl": oauthStartPath,
+		}
+	}
+	return writeOKErr(w, data)
 }
 
 type authLoginRequest struct {

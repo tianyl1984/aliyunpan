@@ -15,6 +15,9 @@ func (s *Server) buildHandler() (http.Handler, error) {
 	mux.Handle("GET /api/auth/status", s.public(s.handleAuthStatus))
 	mux.Handle("POST /api/auth/login", s.public(s.handleAuthLogin))
 	mux.Handle("POST /api/auth/logout", s.public(s.handleAuthLogout))
+	// 第三方登录：浏览器整页跳转，不是 fetch
+	mux.Handle("GET "+oauthStartPath, s.public(s.handleAuthOAuthStart))
+	mux.Handle("GET "+oauthCallbackPrefix+"{state}", s.public(s.handleAuthOAuthCallback))
 
 	// ---- 账号与配置 ----
 	mux.Handle("GET /api/account/current", s.guard(s.handleAccountCurrent))

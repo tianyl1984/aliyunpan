@@ -42,6 +42,13 @@ type failCounter struct {
 	lockedTill time.Time
 }
 
+// session 一次已认证的会话
+type session struct {
+	expire time.Time
+	// user 登录者标识。token/口令登录为空，第三方认证服务登录时为服务返回的用户名
+	user string
+}
+
 // authManager 负责 webui 自身的访问控制（与阿里云盘账号无关）
 type authManager struct {
 	mu sync.Mutex
@@ -52,14 +59,14 @@ type authManager struct {
 	// plainToken 仅在自动生成 token 时非空，用于启动时打印给用户
 	plainToken string
 
-	sessions map[string]time.Time
+	sessions map[string]*session
 	fails    map[string]*failCounter
 	ttl      time.Duration
 }
 
 func newAuthManager(password string) (*authManager, error) {
 	a := &authManager{
-		sessions: make(map[string]time.Time),
+		sessions: make(map[string]*session),
 		fails:    make(map[string]*failCounter),
 		ttl:      defaultSessionTTL,
 	}
@@ -137,11 +144,23 @@ func (a *authManager) login(remoteIP, cred string) (string, error) {
 	}
 
 	delete(a.fails, remoteIP)
+	return a.newSessionLocked(now, "")
+}
+
+// newSession 不校验凭据直接建会话，供身份已由外部认证服务确认的登录方式使用（见 auth_oauth.go）。
+// 调用方必须自己完成身份校验，这里只负责发会话。
+func (a *authManager) newSession(user string) (string, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.newSessionLocked(time.Now(), user)
+}
+
+func (a *authManager) newSessionLocked(now time.Time, user string) (string, error) {
 	sid, err := randomHex(32)
 	if err != nil {
 		return "", internalError("生成会话失败: " + err.Error())
 	}
-	a.sessions[sid] = now.Add(a.ttl)
+	a.sessions[sid] = &session{expire: now.Add(a.ttl), user: user}
 	a.gcLocked(now)
 	return sid, nil
 }
@@ -152,26 +171,32 @@ func (a *authManager) logout(sid string) {
 	delete(a.sessions, sid)
 }
 
-func (a *authManager) valid(sid string) bool {
+// lookup 返回会话，同时惰性清理已过期的会话
+func (a *authManager) lookup(sid string) (*session, bool) {
 	if sid == "" {
-		return false
+		return nil, false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	exp, ok := a.sessions[sid]
+	s, ok := a.sessions[sid]
 	if !ok {
-		return false
+		return nil, false
 	}
-	if time.Now().After(exp) {
+	if time.Now().After(s.expire) {
 		delete(a.sessions, sid)
-		return false
+		return nil, false
 	}
-	return true
+	return s, true
+}
+
+func (a *authManager) valid(sid string) bool {
+	_, ok := a.lookup(sid)
+	return ok
 }
 
 func (a *authManager) gcLocked(now time.Time) {
 	for k, v := range a.sessions {
-		if now.After(v) {
+		if now.After(v.expire) {
 			delete(a.sessions, k)
 		}
 	}

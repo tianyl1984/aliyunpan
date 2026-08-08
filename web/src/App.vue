@@ -54,6 +54,7 @@ async function doLogout() {
       <div class="sidebar-foot">
         <div v-if="account.loggedIn" class="truncate small">{{ account.account?.nickname }}</div>
         <div v-else class="small">未登录云盘</div>
+        <div v-if="auth.user" class="truncate small muted">🔑 {{ auth.user }}</div>
         <button class="btn sm" style="margin-top: 8px; width: 100%" @click="doLogout">退出 Web</button>
       </div>
     </aside>

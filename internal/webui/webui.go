@@ -38,6 +38,17 @@ type Options struct {
 	// TLSCert / TLSKey 可选的 TLS 证书
 	TLSCert string
 	TLSKey  string
+
+	// AuthURL 第三方认证服务（cf-worker-auth）地址，形如 https://auth.example.com。
+	// 设置后登录页会多出一个第三方登录入口；token/口令登录始终保留，两种方式并存。
+	AuthURL string
+	// AuthUsers 允许通过第三方登录的用户名白名单（GitHub login）。
+	// 为空表示完全信任认证服务自身的 legal_user 白名单。
+	AuthUsers []string
+	// ExternalURL 本服务的对外访问地址，形如 https://pan.example.com，
+	// 用于拼接第三方登录的回调地址。不设置时从请求的 Host 推导。
+	// 设置后会自动并入 TrustedOrigins。
+	ExternalURL string
 }
 
 // CmdWebUI 返回 webui 命令定义
@@ -66,8 +77,21 @@ func CmdWebUI() cli.Command {
 			--trusted-origin https://pan.example.com \
 			--trusted-origin http://192.168.1.10:9000
 
+		6. 接入第三方认证服务（cf-worker-auth），登录页多出「使用 GitHub 登录」按钮
+		aliyunpan webui --host 0.0.0.0 \
+			--external-url https://pan.example.com \
+			--auth-url https://auth.example.com \
+			--auth-user your-github-id
+
+	登录方式:
+		两种方式并存，任选其一即可登录。
+		1. token / 口令：--password 指定的口令，或首次启动自动生成并打印的 token。
+		2. 第三方登录：配置 --auth-url 后启用，身份由认证服务校验。
+		   需要在认证服务侧把 --external-url 的域名加进 legal_domain 白名单，
+		   回调地址为 <external-url>/api/auth/oauth/callback/<state>。
+
 	安全提示:
-		- 默认只监听 127.0.0.1。监听非回环地址时必须设置 --password。
+		- 默认只监听 127.0.0.1。监听非回环地址时必须设置 --password 或 --auth-url。
 		- 访问 token 保存在配置目录的 webui.json（权限 0600）。
 		- 写操作要求浏览器 Origin 指向本服务。若通过反向代理或映射后的端口访问，
 		  需用 --trusted-origin 声明对外地址，否则会返回 403 Origin 不匹配。
@@ -76,12 +100,19 @@ func CmdWebUI() cli.Command {
 		Before:   nil,
 		Action: func(c *cli.Context) error {
 			opt := &Options{
-				Host:       c.String("host"),
-				Port:       c.Int("port"),
-				Password:   c.String("password"),
-				AllowShell: c.Bool("allow-shell"),
-				TLSCert:    c.String("tls-cert"),
-				TLSKey:     c.String("tls-key"),
+				Host:        c.String("host"),
+				Port:        c.Int("port"),
+				Password:    c.String("password"),
+				AllowShell:  c.Bool("allow-shell"),
+				TLSCert:     c.String("tls-cert"),
+				TLSKey:      c.String("tls-key"),
+				AuthURL:     strings.TrimSpace(c.String("auth-url")),
+				ExternalURL: strings.TrimSpace(c.String("external-url")),
+			}
+			for _, u := range c.StringSlice("auth-user") {
+				if s := strings.TrimSpace(u); s != "" {
+					opt.AuthUsers = append(opt.AuthUsers, s)
+				}
 			}
 			for _, r := range c.StringSlice("local-root") {
 				if s := strings.TrimSpace(r); s != "" {
@@ -134,6 +165,18 @@ func CmdWebUI() cli.Command {
 				Name:  "tls-key",
 				Usage: "TLS 私钥文件路径",
 			},
+			cli.StringFlag{
+				Name:  "auth-url",
+				Usage: "第三方认证服务地址，形如 https://auth.example.com。设置后登录页会多出第三方登录入口，token/口令登录仍然可用",
+			},
+			cli.StringSliceFlag{
+				Name:  "auth-user",
+				Usage: "允许通过第三方登录的用户名，可指定多次。不指定则完全信任认证服务自身的白名单",
+			},
+			cli.StringFlag{
+				Name:  "external-url",
+				Usage: "本服务的对外访问地址，形如 https://pan.example.com，用于拼接第三方登录的回调地址。放在反向代理后面时建议显式指定（会自动并入可信来源）",
+			},
 		},
 	}
 }
@@ -150,9 +193,10 @@ func RunWebUI(opt *Options) error {
 		opt.Port = DefaultPort
 	}
 
-	// 安全检查：监听非回环地址必须设置口令
-	if !isLoopbackHost(opt.Host) && opt.Password == "" {
-		return fmt.Errorf("监听非回环地址 %s 时必须通过 --password 设置访问口令", opt.Host)
+	// 安全检查：监听非回环地址必须有一种由运维显式掌控的凭据 —— 自己设的口令，
+	// 或者把身份校验交给认证服务。只靠自动生成的 token 不算，那是给本机用的。
+	if !isLoopbackHost(opt.Host) && opt.Password == "" && strings.TrimSpace(opt.AuthURL) == "" {
+		return fmt.Errorf("监听非回环地址 %s 时必须通过 --password 设置访问口令，或通过 --auth-url 接入认证服务", opt.Host)
 	}
 	if opt.AllowShell && !isLoopbackHost(opt.Host) {
 		return fmt.Errorf("--allow-shell 只能在监听回环地址时使用，当前监听 %s", opt.Host)
